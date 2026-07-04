@@ -38,7 +38,7 @@ from airflow.decorators import dag, task
 from extract   import extract_sales_data
 from validate  import validate_data
 from transform import transform_data
-from load      import load_to_sqlite
+from load      import load_to_postgres
 from report    import generate_report
 
 logger = logging.getLogger(__name__)
@@ -66,14 +66,14 @@ DEFAULT_ARGS: dict[str, Any] = {
     dag_id="sales_etl_pipeline",
     description=(
         "End-to-end sales ETL: extract CSV → validate → transform → "
-        "load SQLite → generate summary report."
+        "load PostgreSQL → generate summary report."
     ),
     default_args=DEFAULT_ARGS,
     schedule="@daily",          # Run once per day; change to a cron string as needed
     start_date=datetime(2024, 1, 1),
     catchup=False,              # Do NOT back-fill missed runs
     max_active_runs=1,          # Only one concurrent run at a time
-    tags=["etl", "sales", "sqlite", "learning"],
+    tags=["etl", "sales", "postgresql", "learning"],
 )
 def sales_etl_pipeline() -> None:
     """
@@ -84,7 +84,7 @@ def sales_etl_pipeline() -> None:
     1. **Extract**  — Read `data/raw/sales.csv`
     2. **Validate** — Check for missing values, duplicates, invalid data
     3. **Transform** — Clean, type-cast, and compute `Total = Qty × Price`
-    4. **Load**     — Upsert into SQLite `sales_orders` table
+    4. **Load**     — Upsert into PostgreSQL `sales_orders` table (sales_db)
     5. **Report**   — Query DB and write `data/reports/summary.txt`
     """
 
@@ -164,13 +164,13 @@ def sales_etl_pipeline() -> None:
         )
         return transformed
 
-    # ── TASK 4: Load ─────────────────────────────────────────────────────────
-    @task(task_id="load_to_sqlite")
+    # ── TASK 4: Load ───────────────────────────────────────────────────────────────
+    @task(task_id="load_to_postgres")
     def load_task(transformed_records: list[dict[str, Any]]) -> int:
         """
-        Load transformed records into the SQLite database.
+        Load transformed records into the PostgreSQL sales_db database.
 
-        Strategy: INSERT OR REPLACE — idempotent; safe to re-run.
+        Strategy: INSERT … ON CONFLICT DO UPDATE — idempotent; safe to re-run.
         The table ``sales_orders`` is created if it doesn't exist yet.
 
         Returns the number of rows upserted (pushed to XCom for the
@@ -178,14 +178,14 @@ def sales_etl_pipeline() -> None:
         """
         logger.info("=" * 60)
         logger.info(
-            "TASK: load_to_sqlite — loading %d records.", len(transformed_records)
+            "TASK: load_to_postgres — loading %d records.", len(transformed_records)
         )
         logger.info("=" * 60)
 
-        rows_loaded = load_to_sqlite(transformed_records)
+        rows_loaded = load_to_postgres(transformed_records)
 
         logger.info(
-            "load_task complete — %d rows upserted into SQLite.", rows_loaded
+            "load_task complete — %d rows upserted into PostgreSQL sales_db.", rows_loaded
         )
         return rows_loaded
 

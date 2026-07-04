@@ -1,0 +1,6 @@
+# Sales ETL Pipeline — Python dependencies
+#
+# psycopg2-binary: PostgreSQL adapter for Python.
+#   The "-binary" variant ships with precompiled libpq so no system libs are
+#   needed inside the Airflow Docker container.
+psycopg2-binary>=2.9

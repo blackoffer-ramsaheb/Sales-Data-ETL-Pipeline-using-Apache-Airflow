@@ -1,8 +1,8 @@
 """
 report.py
 ---------
-Queries the SQLite database and generates a human-readable summary report
-saved to data/reports/summary.txt.
+Queries the **PostgreSQL** ``sales_db`` database and generates a
+human-readable summary report saved to data/reports/summary.txt.
 
 Report sections
 ---------------
@@ -27,25 +27,17 @@ Report sections
 
 import logging
 import os
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any
+
+import psycopg2
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Path helpers
+# Path helper (report file — still written to disk for artefact purposes)
 # ---------------------------------------------------------------------------
-
-def _get_db_path() -> str:
-    container_path = "/opt/airflow/database/sales.db"
-    if os.path.exists("/opt/airflow"):
-        return container_path
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir)
-    return os.path.join(project_root, "database", "sales.db")
-
 
 def _get_report_path() -> str:
     container_path = "/opt/airflow/data/reports/summary.txt"
@@ -57,12 +49,27 @@ def _get_report_path() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Query helpers
+# Connection helper (mirrors load.py)
 # ---------------------------------------------------------------------------
 
-def _run_query(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[Any]:
+def _get_connection() -> "psycopg2.connection":
+    """Return a psycopg2 connection using SALES_DB_* env vars."""
+    return psycopg2.connect(
+        host=os.environ.get("SALES_DB_HOST", "postgres"),
+        port=int(os.environ.get("SALES_DB_PORT", 5432)),
+        dbname=os.environ.get("SALES_DB_NAME", "sales_db"),
+        user=os.environ.get("SALES_DB_USER", "sales_user"),
+        password=os.environ.get("SALES_DB_PASSWORD", "sales_password"),
+        connect_timeout=10,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Query helper
+# ---------------------------------------------------------------------------
+
+def _run_query(cursor: Any, sql: str, params: tuple = ()) -> list[Any]:
     """Execute *sql* with *params* and return all rows."""
-    cursor = conn.cursor()
     cursor.execute(sql, params)
     return cursor.fetchall()
 
@@ -73,7 +80,8 @@ def _run_query(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[A
 
 def generate_report() -> dict[str, Any]:
     """
-    Query the ``sales_orders`` table and produce a summary report file.
+    Query the ``sales_orders`` table in PostgreSQL and produce a summary
+    report file.
 
     Returns
     -------
@@ -82,63 +90,85 @@ def generate_report() -> dict[str, Any]:
 
     Raises
     ------
-    FileNotFoundError
-        If the SQLite database does not exist yet (Load step must run first).
+    psycopg2.DatabaseError
+        On any database-level error (propagated after logging).
     """
-    db_path = _get_db_path()
+    logger.info(
+        "Connecting to PostgreSQL sales_db at %s:%s for reporting.",
+        os.environ.get("SALES_DB_HOST", "postgres"),
+        os.environ.get("SALES_DB_PORT", 5432),
+    )
 
-    if not os.path.exists(db_path):
-        raise FileNotFoundError(
-            f"Database not found at '{db_path}'. Run the Load step first."
-        )
+    try:
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cursor:
 
-    logger.info("Connecting to SQLite database at '%s' for reporting.", db_path)
+                # ── Core KPIs ─────────────────────────────────────────────
+                _run_query(cursor, "SELECT COUNT(*) FROM sales_orders;")
+                (total_orders,) = cursor.fetchone() if False else _run_query(
+                    cursor, "SELECT COUNT(*) FROM sales_orders;"
+                )[0]
 
-    with sqlite3.connect(db_path) as conn:
-        # ── Core KPIs ────────────────────────────────────────────────────────
-        (total_orders,) = _run_query(conn, "SELECT COUNT(*) FROM sales_orders;")[0]
-        (total_revenue,) = _run_query(conn, "SELECT ROUND(SUM(total), 2) FROM sales_orders;")[0]
-        (avg_order_value,) = _run_query(conn, "SELECT ROUND(AVG(total), 2) FROM sales_orders;")[0]
+                (total_revenue,) = _run_query(
+                    cursor,
+                    "SELECT ROUND(SUM(total)::numeric, 2) FROM sales_orders;"
+                )[0]
 
-        # ── Top selling product by units ─────────────────────────────────────
-        top_product_rows = _run_query(
-            conn,
-            """
-            SELECT product, SUM(quantity) AS units_sold
-            FROM   sales_orders
-            GROUP  BY product
-            ORDER  BY units_sold DESC
-            LIMIT  1;
-            """,
-        )
-        top_product, top_units = top_product_rows[0] if top_product_rows else ("N/A", 0)
+                (avg_order_value,) = _run_query(
+                    cursor,
+                    "SELECT ROUND(AVG(total)::numeric, 2) FROM sales_orders;"
+                )[0]
 
-        # ── Top 5 products by revenue ────────────────────────────────────────
-        top5_products = _run_query(
-            conn,
-            """
-            SELECT   product,
-                     ROUND(SUM(total), 2)  AS revenue,
-                     COUNT(*)              AS orders
-            FROM     sales_orders
-            GROUP BY product
-            ORDER BY revenue DESC
-            LIMIT    5;
-            """,
-        )
+                # ── Top selling product by units ───────────────────────────
+                top_product_rows = _run_query(
+                    cursor,
+                    """
+                    SELECT product, SUM(quantity) AS units_sold
+                    FROM   sales_orders
+                    GROUP  BY product
+                    ORDER  BY units_sold DESC
+                    LIMIT  1;
+                    """,
+                )
+                top_product, top_units = (
+                    top_product_rows[0] if top_product_rows else ("N/A", 0)
+                )
 
-        # ── Revenue by month ─────────────────────────────────────────────────
-        monthly_revenue = _run_query(
-            conn,
-            """
-            SELECT   SUBSTR(date, 1, 7)       AS month,
-                     ROUND(SUM(total), 2)     AS revenue,
-                     COUNT(*)                 AS orders
-            FROM     sales_orders
-            GROUP BY month
-            ORDER BY month ASC;
-            """,
-        )
+                # ── Top 5 products by revenue ──────────────────────────────
+                top5_products = _run_query(
+                    cursor,
+                    """
+                    SELECT   product,
+                             ROUND(SUM(total)::numeric, 2) AS revenue,
+                             COUNT(*)                      AS orders
+                    FROM     sales_orders
+                    GROUP BY product
+                    ORDER BY revenue DESC
+                    LIMIT    5;
+                    """,
+                )
+
+                # ── Revenue by month ───────────────────────────────────────
+                # Use TO_CHAR on the DATE column — cleaner than SUBSTR on TEXT
+                monthly_revenue = _run_query(
+                    cursor,
+                    """
+                    SELECT   TO_CHAR(date, 'YYYY-MM')         AS month,
+                             ROUND(SUM(total)::numeric, 2)    AS revenue,
+                             COUNT(*)                         AS orders
+                    FROM     sales_orders
+                    GROUP BY month
+                    ORDER BY month ASC;
+                    """,
+                )
+
+        finally:
+            conn.close()
+
+    except psycopg2.DatabaseError as exc:
+        logger.exception("Database error during report step: %s", exc)
+        raise
 
     # ── Build report text ────────────────────────────────────────────────────
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -199,8 +229,8 @@ def generate_report() -> dict[str, Any]:
 
     metrics = {
         "total_orders":      total_orders,
-        "total_revenue":     total_revenue,
-        "avg_order_value":   avg_order_value,
+        "total_revenue":     float(total_revenue),
+        "avg_order_value":   float(avg_order_value),
         "top_product":       top_product,
         "top_product_units": top_units,
         "report_path":       report_path,

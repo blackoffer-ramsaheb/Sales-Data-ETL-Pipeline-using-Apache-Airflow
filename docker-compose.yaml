@@ -76,6 +76,12 @@ x-airflow-common:
     # WARNING: Use _PIP_ADDITIONAL_REQUIREMENTS option ONLY for a quick checks
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    # ── Sales ETL PostgreSQL connection (sales_db) ─────────────────────────
+    SALES_DB_HOST: postgres
+    SALES_DB_PORT: 5432
+    SALES_DB_NAME: ${SALES_DB_NAME:-sales_db}
+    SALES_DB_USER: ${SALES_DB_USER:-sales_user}
+    SALES_DB_PASSWORD: ${SALES_DB_PASSWORD:-sales_password}
     # The following line can be used to set a custom config file, stored in the local config folder
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
@@ -104,6 +110,13 @@ services:
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
+      # Init script — runs ONCE on first container creation to create sales_db
+      - ${AIRFLOW_PROJ_DIR:-.}/init-db:/docker-entrypoint-initdb.d
+    ports:
+      # Expose PostgreSQL on host port 5433 so external tools (pgAdmin, DBeaver,
+      # psql, Python scripts) can connect from outside Docker.
+      # Use localhost:5433 with user=sales_user / db=sales_db.
+      - "5433:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 10s
